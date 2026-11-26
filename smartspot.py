@@ -230,7 +230,23 @@ def main():
 
         candidates.sort(key=lambda x: (x["score"], x["net_rr"]), reverse=True)
         if not candidates:
-            print("No setup passed V6 filters. No alert sent.")
+            print("No setup passed V6 filters. Sending scan-status report to Telegram.")
+            scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            btc_status = "BLOCK" if not btc_ok else "PASS"
+            report = "\n".join([
+                f"SMARTSPOT AI {VERSION} | SCAN REPORT",
+                "━━━━━━━━━━━━━━━━━━",
+                "Scan completed successfully.",
+                f"Time: {scan_time}",
+                f"BTC trend filter: {btc_status}",
+                f"Pairs checked: {len(WATCHLIST)}",
+                "Valid setups: 0",
+                "No trade signal this run.",
+                "No order was placed. Filters were not relaxed.",
+                "━━━━━━━━━━━━━━━━━━",
+                "This is a scan-status update, not a buy/sell recommendation.",
+            ])
+            send_telegram(report)
             return
 
         for s in candidates[:MAX_SIGNALS_PER_RUN]:

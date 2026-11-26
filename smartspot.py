@@ -271,13 +271,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-TP3 | 3.5R',fmt(s['tp3']),'','📐 Retracement reference (1H)',
-        f"50%: {fmt(s['fib50'])}",f"61.8%: {fmt(s['fib618'])}",'','🧭 FILTERS PASSED'
-    ]
-    lines += ['• '+r for r in s['reasons']]
-    lines += ['','⚖️ Risk estimate: '+f"{s['risk_pct']:.2f}% price distance",
-              f"🧮 Estimated net R/R to TP1 (fee assumption): {s['net_rr1']:.2f}R",
-              '⏳ Entry is NOT executed or guaranteed. Check price and liquidity before acting.',
+eed. Check price and liquidity before acting.',
               '📍 Manual execution only | No orders placed','🕯 Closed candle: '+s['candle_time'],
               '━━━━━━━━━━━━━━━━━━━━','⚠️ Setup score is rule-based, not calibrated win probability.']
     return '\n'.join(lines)

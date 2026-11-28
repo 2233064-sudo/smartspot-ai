@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 # Signals only. NO automatic orders.
 # =========================================================
 
-TELEGRAM_TOKEN = ""
-TELEGRAM_CHAT_ID = ""
+TELEGRAM_TOKEN = 8814058749:AAEZnslerRYWElLmZpHLbmYPf1f7CFfPtjU
+TELEGRAM_CHAT_ID = 1729032800
 
 WATCHLIST = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT",

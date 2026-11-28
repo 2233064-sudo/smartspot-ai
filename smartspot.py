@@ -1,277 +1,401 @@
-#!/usr/bin/env python3
-# SMARTSPOT AI V6 - KuCoin SPOT scanner only; never places orders.
-
-import os
-import time
-import json
-import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
 
 import ccxt
+import time
+import requests
+from datetime import datetime, timezone
 
-VERSION = "V6"
+# ==================================================
+# GROUP: گروه تخصصی سیگنال فیوچرز مهندس عدنانی
+# ADNANI FUTURES V7
+# Signals only. NO automatic orders.
+# ==================================================
+
+TELEGRAM_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
+
 WATCHLIST = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT",
     "BNB/USDT", "ADA/USDT", "DOGE/USDT", "LINK/USDT",
-    "AVAX/USDT", "LTC/USDT", "DOT/USDT", "ASTER/USDT",
+    "AVAX/USDT", "LTC/USDT", "DOT/USDT", "ASTER/USDT"
 ]
-CANDLE_LIMIT = 150
-MIN_SCORE = 72
-MIN_NET_RR_TP1 = 1.20
-MAX_SIGNALS_PER_RUN = 1
-PAUSE = 0.20
-TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+MIN_SCORE = 88
+RISK_PERCENT = 0.5
+LEVERAGE_REFERENCE = 2
+
+exchange = ccxt.binanceusdm({
+    "enableRateLimit": True,
+    "options": {"defaultType": "future"}
+})
 
 
 def ema(values, period):
     if len(values) < period:
         return None
-    alpha = 2.0 / (period + 1.0)
-    result = sum(values[:period]) / period
-    for value in values[period:]:
-        result = alpha * value + (1.0 - alpha) * result
+
+    result = values[0]
+    alpha = 2 / (period + 1)
+
+    for value in values[1:]:
+        result = alpha * value + (1 - alpha) * result
+
     return result
 
 
 def rsi(values, period=14):
-    if len(values) < period + 1:
+    if len(values) <= period:
         return None
-    changes = [values[i] - values[i - 1] for i in range(len(values)-period, len(values))]
-    gain = sum(max(x, 0) for x in changes) / period
-    loss = sum(max(-x, 0) for x in changes) / period
-    return 100.0 if loss == 0 else 100.0 - 100.0 / (1.0 + gain / loss)
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(values)):
+        change = values[i] - values[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 
 def atr(candles, period=14):
-    if len(candles) < period + 1:
+    if len(candles) <= period:
         return None
-    tr = []
+
+    trs = []
+
     for i in range(1, len(candles)):
-        high, low, prev_close = candles[i][2], candles[i][3], candles[i-1][4]
-        tr.append(max(high-low, abs(high-prev_close), abs(low-prev_close)))
-    return sum(tr[-period:]) / period
+        high = candles[i][2]
+        low = candles[i][3]
+        previous_close = candles[i - 1][4]
+
+        tr = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close)
+        )
+        trs.append(tr)
+
+    return sum(trs[-period:]) / period
 
 
-def get_candles(exchange, symbol, timeframe):
-    rows = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=CANDLE_LIMIT)
-    if len(rows) < 60:
-        raise ValueError(f"Not enough {timeframe} candles: {len(rows)}")
-    return rows[:-1]  # Never analyze the still-forming candle.
-
-
-def rising_structure(candles):
-    sample = candles[-40:]
-    old, new = sample[:20], sample[20:]
-    return (
-        max(c[2] for c in new) > max(c[2] for c in old)
-        and min(c[3] for c in new) > min(c[3] for c in old)
+def fetch_data(symbol, timeframe):
+    return exchange.fetch_ohlcv(
+        symbol, timeframe, limit=120
     )
 
 
-def stats(candles):
+def trend(candles):
     closes = [c[4] for c in candles]
-    e20, e50 = ema(closes, 20), ema(closes, 50)
+
+    e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
+    last = closes[-1]
+
+    if last > e20 > e50:
+        return "BULL"
+
+    if last < e20 < e50:
+        return "BEAR"
+
+    return "NEUTRAL"
+
+
+def btc_filter():
+    h4 = fetch_data("BTC/USDT", "4h")
+    h1 = fetch_data("BTC/USDT", "1h")
+
+    t4 = trend(h4)
+    t1 = trend(h1)
+
+    if t4 == "BULL" and t1 == "BULL":
+        return "BULL"
+
+    if t4 == "BEAR" and t1 == "BEAR":
+        return "BEAR"
+
+    return "NEUTRAL"
+
+
+def analyze(symbol, btc_state):
+    h4 = fetch_data(symbol, "4h")
+    h1 = fetch_data(symbol, "1h")
+    m15 = fetch_data(symbol, "15m")
+
+    t4 = trend(h4)
+    t1 = trend(h1)
+
+    closes = [c[4] for c in m15]
+    volumes = [c[5] for c in m15]
+
+    price = closes[-1]
+    r = rsi(closes)
+    volatility = atr(m15)
+
+    if r is None or volatility is None or volatility <= 0:
+        return None
+
+    e20 = ema(closes, 20)
+    avg_volume = sum(volumes[-21:-1]) / 20
+
+    if avg_volume <= 0:
+        return None
+
+    volume_ratio = volumes[-1] / avg_volume
+
+    candle = m15[-1]
+    previous = m15[-2]
+
+    candle_range = candle[2] - candle[3]
+
+    if candle_range <= 0:
+        return None
+
+    body = abs(candle[4] - candle[1])
+    body_ratio = body / candle_range
+
+    direction = None
+
+    if t4 == "BULL" and t1 == "BULL":
+        if price > e20 and 50 <= r <= 68:
+            if candle[4] > candle[1] and body_ratio >= 0.45:
+                direction = "LONG"
+
+    if t4 == "BEAR" and t1 == "BEAR":
+        if price < e20 and 32 <= r <= 50:
+            if candle[4] < candle[1] and body_ratio >= 0.45:
+                direction = "SHORT"
+
+    if direction is None:
+        return None
+
+    score = 0
+    reasons = []
+
+    # Multi-timeframe trend
+    score += 25
+    reasons.append("4H and 1H trend alignment")
+
+    # 15-minute momentum confirmation
+    score += 20
+    reasons.append("15M candle confirmation")
+
+    # RSI confirmation
+    score += 15
+    reasons.append("RSI confirmation")
+
+    # Volume confirmation
+    if volume_ratio >= 1.5:
+        score += 15
+        reasons.append("Strong volume")
+
+    elif volume_ratio >= 1.2:
+        score += 10
+        reasons.append("Above-average volume")
+
+    else:
+        return None
+
+    # BTC market filter
+    if direction == "LONG":
+        if btc_state == "BULL":
+            score += 15
+            reasons.append("BTC bullish alignment")
+
+        elif btc_state == "NEUTRAL":
+            score += 8
+            reasons.append("BTC neutral")
+
+        else:
+            return None
+
+    elif direction == "SHORT":
+        if btc_state == "BEAR":
+            score += 15
+            reasons.append("BTC bearish alignment")
+
+        elif btc_state == "NEUTRAL":
+            score += 8
+            reasons.append("BTC neutral")
+
+        else:
+            return None
+
+    # Price position
+    if direction == "LONG" and price > e20:
+        score += 10
+
+    elif direction == "SHORT" and price < e20:
+        score += 10
+
+    # Risk calculations
+    sl_distance = volatility * 1.5
+
+    if direction == "LONG":
+        sl = price - sl_distance
+        tp1 = price + (sl_distance * 2)
+        tp2 = price + (sl_distance * 3)
+
+    else:
+        sl = price + sl_distance
+        tp1 = price - (sl_distance * 2)
+        tp2 = price - (sl_distance * 3)
+
+    if score < MIN_SCORE:
+        return None
+
     return {
-        "close": closes[-1], "ema20": e20, "ema50": e50,
-        "bull": bool(e20 and e50 and closes[-1] > e20 > e50),
-        "rsi": rsi(closes), "atr": atr(candles),
-        "structure": rising_structure(candles),
+        "symbol": symbol,
+        "direction": direction,
+        "score": score,
+        "entry": price,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "rsi": r,
+        "volume_ratio": volume_ratio,
+        "btc": btc_state,
+        "reasons": reasons
     }
-
-
-def analyze(symbol, c4, c1, c15, btc_ok):
-    a4, a1, a15 = stats(c4), stats(c1), stats(c15)
-    closes = [c[4] for c in c15]
-    price, e20, e50 = closes[-1], ema(closes, 20), ema(closes, 50)
-    vol_atr, current_rsi = a15["atr"], a15["rsi"]
-    if not e20 or not e50 or not vol_atr or current_rsi is None or price <= 0:
-        return None
-
-    atr_pct = 100 * vol_atr / price
-    if not 0.15 <= atr_pct <= 4.0:
-        return None
-
-    # Pullback watch zone around the 15m EMA20.
-    zone_low = e20 - 0.25 * vol_atr
-    zone_high = e20 + 0.35 * vol_atr
-    in_zone = zone_low <= price <= zone_high
-    trend15 = price > e50 and e20 > e50
-
-    cur, prev = c15[-1], c15[-2]
-    bullish = cur[4] > cur[1]
-    engulfing = (
-        bullish and prev[4] < prev[1]
-        and cur[4] >= prev[1] and cur[1] <= prev[4]
-    )
-    candle_ok = bullish and (engulfing or abs(cur[4]-cur[1]) >= 0.35*vol_atr)
-
-    vols = [c[5] for c in c15[-21:-1]]
-    avg_vol = sum(vols)/len(vols) if vols else 0
-    rel_vol = cur[5]/avg_vol if avg_vol else 0
-
-    # Transparent rule score, not a probability of winning.
-    score, reasons = 0, []
-    checks = [
-        (a4["bull"], 18, "4H trend bullish"),
-        (a1["bull"], 18, "1H trend bullish"),
-        (a4["structure"] or a1["structure"], 10, "rising swing structure"),
-        (trend15, 14, "15m trend aligned"),
-        (in_zone, 10, "price in pullback watch zone"),
-        (rel_vol >= 1.20, 12, f"relative volume {rel_vol:.2f}x"),
-        (candle_ok, 10, "bullish candle confirmation"),
-        (45 <= current_rsi <= 68, 5, f"RSI {current_rsi:.1f}"),
-        (btc_ok, 3, "BTC filter passed"),
-    ]
-    for passed, points, label in checks:
-        if passed:
-            score += points
-            reasons.append(label)
-
-    if not (a4["bull"] and a1["bull"] and trend15 and in_zone and candle_ok):
-        return None
-    if not btc_ok or score < MIN_SCORE:
-        return None
-
-    swing_low = min(c[3] for c in c15[-12:])
-    stop = min(swing_low - 0.25*vol_atr, price - 1.10*vol_atr)
-    risk = price - stop
-    if risk <= 0 or risk/price > 0.06:
-        return None
-
-    # Approximate round-trip fee allowance. Adjust for your actual fee tier.
-    fee = 0.002
-    tp1, tp2, tp3 = price+1.5*risk, price+2.5*risk, price+3.5*risk
-    net_reward = (tp1-price) - (price+tp1)*fee
-    net_risk = risk + (price+stop)*fee
-    net_rr = net_reward/net_risk if net_risk > 0 else 0
-    if net_rr < MIN_NET_RR_TP1:
-        return None
-
-    return {
-        "symbol": symbol, "price": price, "zone_low": zone_low,
-        "zone_high": zone_high, "stop": stop, "tp1": tp1,
-        "tp2": tp2, "tp3": tp3, "score": score,
-        "rsi": current_rsi, "atr_pct": atr_pct,
-        "rel_vol": rel_vol, "net_rr": net_rr,
-        "reasons": reasons, "candle_time": cur[0],
-    }
-
-
-def price_text(value):
-    if value >= 100:
-        return f"{value:,.3f}"
-    if value >= 1:
-        return f"{value:.4f}"
-    if value >= 0.01:
-        return f"{value:.5f}"
-    return f"{value:.8f}"
 
 
 def send_telegram(message):
-    if not TOKEN or not CHAT_ID:
-        print("Telegram secrets missing: message not sent.")
-        return False
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = urllib.parse.urlencode({
-        "chat_id": CHAT_ID, "text": message,
-        "disable_web_page_preview": "true",
-    }).encode()
-    req = urllib.request.Request(url, data=payload, method="POST")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials are missing.")
+        return
+
+    url = (
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+        f"/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
-            result = json.loads(response.read().decode())
-        if not result.get("ok"):
-            print("Telegram API error:", result)
-            return False
-        print("Telegram message sent.")
-        return True
+        response = requests.post(
+            url, json=payload, timeout=20
+        )
+        response.raise_for_status()
+
     except Exception as exc:
-        print(f"Telegram send error: {type(exc).__name__}: {exc}")
-        return False
+        print("Telegram error:", exc)
+
+
+def format_signal(s):
+    now = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+    return (
+        "🏆 گروه تخصصی سیگنال فیوچرز مهندس عدنانی\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🚨 {s['symbol']} | {s['direction']}\n"
+        f"⭐ Signal score: {s['score']}/100\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"Entry: {s['entry']:.8f}\n"
+        f"Stop Loss: {s['sl']:.8f}\n"
+        f"TP1: {s['tp1']:.8f}\n"
+        f"TP2: {s['tp2']:.8f}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"RSI: {s['rsi']:.2f}\n"
+        f"Volume: {s['volume_ratio']:.2f}x\n"
+        f"BTC filter: {s['btc']}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Reasons:\n"
+        + "\n".join(f"• {x}" for x in s["reasons"])
+        + "\n━━━━━━━━━━━━━━━━━━\n"
+        f"Risk reference: {RISK_PERCENT}%\n"
+        f"Leverage reference: {LEVERAGE_REFERENCE}x\n"
+        f"Time: {now}\n"
+        "⚠️ Signal only. No order was placed."
+    )
 
 
 def main():
-    print(f"SMARTSPOT AI {VERSION} starting: {datetime.now(timezone.utc).isoformat()}")
-    exchange = ccxt.kucoin({
-        "enableRateLimit": True, "timeout": 30000,
-        "options": {"defaultType": "spot"},
-    })
+    print("Starting Adnani Futures V7 scan...")
+
+    valid = []
+    errors = 0
+
     try:
-        markets = exchange.load_markets()
-        btc4 = stats(get_candles(exchange, "BTC/USDT", "4h"))
-        time.sleep(PAUSE)
-        btc1 = stats(get_candles(exchange, "BTC/USDT", "1h"))
-        btc_ok = btc4["bull"] and btc1["bull"]
-        print("BTC filter:", "PASS" if btc_ok else "BLOCK")
+        btc_state = btc_filter()
 
-        candidates = []
-        for symbol in WATCHLIST:
-            try:
-                market = markets.get(symbol)
-                if not market or not market.get("spot") or not market.get("active", True):
-                    print("Skipping unavailable spot pair:", symbol)
-                    continue
-                c4 = get_candles(exchange, symbol, "4h")
-                time.sleep(PAUSE)
-                c1 = get_candles(exchange, symbol, "1h")
-                time.sleep(PAUSE)
-                c15 = get_candles(exchange, symbol, "15m")
-                time.sleep(PAUSE)
-                result = analyze(symbol, c4, c1, c15, btc_ok)
-                if result:
-                    candidates.append(result)
-                    print(f"Candidate {symbol}: score {result['score']}")
-                else:
-                    print("No valid setup:", symbol)
-            except Exception as exc:
-                print(f"Pair error {symbol}: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        print("BTC filter error:", exc)
 
-        candidates.sort(key=lambda x: (x["score"], x["net_rr"]), reverse=True)
-        if not candidates:
-            print("No setup passed V6 filters. Sending scan-status report to Telegram.")
-            scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            btc_status = "BLOCK" if not btc_ok else "PASS"
-            report = "\n".join([
-                f"SMARTSPOT AI {VERSION} | SCAN REPORT",
-                "━━━━━━━━━━━━━━━━━━",
-                "Scan completed successfully.",
-                f"Time: {scan_time}",
-                f"BTC trend filter: {btc_status}",
-                f"Pairs checked: {len(WATCHLIST)}",
-                "Valid setups: 0",
-                "No trade signal this run.",
-                "No order was placed. Filters were not relaxed.",
-                "━━━━━━━━━━━━━━━━━━",
-                "This is a scan-status update, not a buy/sell recommendation.",
-            ])
-            send_telegram(report)
-            return
+        send_telegram(
+            "گروه تخصصی سیگنال فیوچرز مهندس عدنانی\n"
+            "BTC data unavailable.\n"
+            "Scan aborted for safety."
+        )
+        return
 
-        for s in candidates[:MAX_SIGNALS_PER_RUN]:
-            reason_text = "\n".join("- " + x for x in s["reasons"])
-            candle_utc = datetime.fromtimestamp(
-                s["candle_time"]/1000, timezone.utc
-            ).strftime("%Y-%m-%d %H:%M")
-            lines = [
-                f"SMARTSPOT AI {VERSION} | SPOT BUY SETUP",
-                "━━━━━━━━━━━━━━━━━━",
-                f"Pair: {s['symbol']}",
-                f"Setup quality: {s['score']}/100",
-                f"Reference price: {price_text(s['price'])}",
-                f"Entry watch zone: {price_text(s['zone_low'])} - {price_text(s['zone_high'])}",
-                f"Stop loss: {price_text(s['stop'])}",
-                f"TP1 (1.5R): {price_text(s['tp1'])}",
-                f"TP2 (2.5R): {price_text(s['tp2'])}",
-                f"TP3 (3.5R): {price_text(s['tp3'])}",
-                f"Estimated net RR to TP1: {s['net_rr']:.2f}",
-                f"RSI: {s['rsi']:.1f} | ATR: {s['atr_pct']:.2f}%",
-                f"Relative volume: {s['rel_vol']:.2f}x",
-                "Why it passed:", reason_text,
-                "━━━━━━━━━━━━━━━━━━",
-                "Closed 15m candle analysis. Not a guaranteed result.",
-                "No order placed. No martingale. Manage risk independently.",
+    print("BTC state:", btc_state)
+
+    for symbol in WATCHLIST:
+        try:
+            result = analyze(symbol, btc_state)
+
+            if result:
+                valid.append(result)
+                print("SETUP:", symbol, result["direction"])
+
+            else:
+                print("No setup:", symbol)
+
+        except Exception as exc:
+            errors += 1
+            print("Error:", symbol, exc)
+
+        time.sleep(0.5)
+
+    valid.sort(key=lambda x: x["score"], reverse=True)
+
+    if valid:
+        for s in valid:
+            send_telegram(format_signal(s))
+
+        report = (
+            "📊 گروه تخصصی سیگنال فیوچرز مهندس عدنانی\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Scan completed.\n"
+            f"BTC filter: {btc_state}\n"
+            f"Pairs checked: {len(WATCHLIST)}\n"
+            f"Valid setups: {len(valid)}\n"
+            f"Errors: {errors}\n"
+            "Signals sent.\n"
+            "No orders were placed."
+        )
+
+    else:
+        report = (
+            "📊 گروه تخصصی سیگنال فیوچرز مهندس عدنانی\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Scan completed successfully.\n"
+            f"BTC filter: {btc_state}\n"
+            f"Pairs checked: {len(WATCHLIST)}\n"
+            "Valid setups: 0\n"
+            f"Errors: {errors}\n"
+            "No qualified futures signal.\n"
+            "Filters were not relaxed.\n"
+            "No order was placed."
+        )
+
+    send_telegram(report)
+
+
+if __name__ == "__main__":
+    main()
+Manage risk independently.",
                 f"Candle time (UTC): {candle_utc}",
             ]
             send_telegram("\n".join(lines))
